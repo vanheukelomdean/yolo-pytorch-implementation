@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as func
+from  abstract_layers import DetectionLayer, EmptyLayer
 import numpy as np
 
 def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
@@ -14,20 +15,19 @@ def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
     """
     activation = layer_data.get('activation')
     batch_normalize = int(layer_data.get('batch_normalize') or 0)
-
     filters = int(layer_data.get("filters"))
     padding = int(layer_data.get("pad"))
     kernel_size = int(layer_data.get("size"))
     stride = int(layer_data.get("stride"))
-
 
     if padding:
         pad = (kernel_size - 1) // 2
     else:
         pad = 0
 
+    print (prev_filters, filters)
     # Add convolutional layer to the layer sequence
-    conv_sublayer = nn.Conv2d(filters, kernel_size, stride, pad, in_channels=prev_filters, bias = not bool(batch_normalize))
+    conv_sublayer = nn.Conv2d(prev_filters, filters, kernel_size, stride, pad, bias = not bool(batch_normalize))
     module.add_module("conv_{0}".format(layer_index), conv_sublayer)
 
     # Chain batch normalization layer to convolutional layer
@@ -40,6 +40,7 @@ def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
     if activation == "leaky":
         activation_sublayer = nn.LeakyReLU(0.1, inplace=True)
         module.add_module("leaky_{0}".format(layer_index), activation_sublayer)
+    return filters
 
 def upsample_layer(module, layer_index: int, layer_data: dict):
     """
@@ -64,19 +65,23 @@ def route_layer(module, layer_index: int, layer_data: dict, output_filters, filt
     :param output_filters: list of computed feature maps from previous layers
     :param filters: feature maps from this layers
     """
+    bEnd = True
     # Transform layer index(s) from string to list
     layer_data["layers"] = layer_data["layers"].split(',')
 
     start = int(layer_data["layers"][0])
-    end = int(layer_data["layers"][1] or 0) # Index end to 0 if no route end is given
+    try:
+        end = int(layer_data["layers"][1]) # Index end to 0 if no route end is given
+    except IndexError:
+        bEnd = False
 
     # Use empty layer
-    route = nn.Module.EmptyLayer()
+    route = EmptyLayer()
     module.add_module("route_{0}".format(layer_index), route)
 
     # Set the feature maps of this layer to the concatenation of the end indexed feature maps and
     # start indexed feature maps if the end index is specified
-    if end < layer_index:
+    if bEnd and end < layer_index:
         filters = output_filters[start] + output_filters[end]
     else:
         filters = output_filters[start]
@@ -88,7 +93,7 @@ def shortcut_layer(module, layer_index: int):
     :param module: The module storing the list of sub-module layers
     :param layer_index: Number to name network layers in order
     '''
-    module.add_module("shortcut_{}".format(layer_index), nn.Module.EmptyLayer())
+    module.add_module("shortcut_{}".format(layer_index), EmptyLayer())
 
 def yolo_layer(module, layer_index: int, layer_data: dict):
     '''
@@ -111,12 +116,33 @@ def yolo_layer(module, layer_index: int, layer_data: dict):
 
 def create_modules(blocks):
     cnn_metadata = blocks[0]
-    module_list = nn.Module_list()
+    module_list = nn.ModuleList()
     prev_filters = 3
     # defined for back propogation
+    filters = None
     output_filters = []
+    layer_index = 0
+    layer_data ={}
+    module = None
 
-    block_map = {'convolutional': conv_layer()}
-    for index, block in enumerate(blocks[1:]):
+    for layer_index, layer_data in enumerate(blocks[1:]):
         module = nn.Sequential()
-        block_map[block["type"]]
+        layer_type = layer_data.get("type")
+
+        if layer_type == 'convolutional':
+            filters = conv_layer(module, layer_index, layer_data, prev_filters)
+        elif layer_type == 'upsample':
+            upsample_layer(module, layer_index, layer_data)
+        elif layer_type == 'route':
+            route_layer(module, layer_index, layer_data, output_filters, filters)
+        elif layer_type == 'shortcut':
+            shortcut_layer(module, layer_index)
+        elif layer_type == 'yolo':
+            yolo_layer(module, layer_index, layer_data)
+
+        module_list.append(module)
+        prev_filters = filters
+        output_filters.append(filters)
+
+
+    return (cnn_metadata, module_list)

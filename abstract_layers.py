@@ -9,5 +9,8 @@ class DetectionLayer(nn.Module):
         self.anchors = anchors
 
 class EmptyLayer(nn.Module):
+    """
+        Base empty Layer used by shortcut and route layers
+    """
     def __init__(self):
         super(EmptyLayer, self).__init__()

@@ -1,8 +1,72 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as func
-from  abstract_layers import DetectionLayer, EmptyLayer
-import numpy as np
+from abstract_layers import DetectionLayer, EmptyLayer
+from cfg_parser import parse_cfg, print_cfg
+from util import *
+
+class DarkNet (nn.Module):
+    """"
+        Model class to override Module forward function for forward passing through cnn layers
+    """
+    def __init__(self, cfg_file_path: str, cuda: bool = False):
+        super(DarkNet, self).__init__()
+        self.blocks = parse_cfg(cfg_file_path)
+        self.cnn_metadata, self.module_list = create_modules(self.blocks)
+        self.cuda = cuda
+
+    def forward(self, x):
+        # Exclude first 'net' block when iterating
+        modules = self.blocks[1:]
+        # Cached feature maps of every layer
+        outputs = {}
+        write = False
+        for index, module in enumerate(modules):
+            module_type = (module["type"])
+            x0 = x
+            # Input feature map of next module is the output of the current layer if conv or upsample
+            if module_type == "convolutional" or module_type == "upsample":
+                x = self.module_list[index](x)
+
+            # Set inputs of next layer to previously cached outputs
+            elif module_type == "route":
+                route_layers = [int(a) for a in module["layers"]]
+
+                # Reset start parameter to num layers behind index
+                if (route_layers[0]) > 0:
+                    route_layers[0] -= index
+                # Feed output of `start` layers behind current layer to route output
+                if len(route_layers) == 1:
+                    x = outputs[index + route_layers[0]]
+
+                # Start and end route parameters
+                else:
+                    # Reset end parameter to num layers behind index
+                    if (route_layers[1]) > 0:
+                        route_layers[1] -= index
+                    # Feed concatenated output of `start` layers and `end` layers behind current layer to route output
+                    x = torch.cat((outputs[index + route_layers[0]],
+                                   outputs[index + route_layers[1]]), 1)
+
+            # Pass inputs to outputs
+            elif module_type == "shortcut":
+                x = outputs[index - 1] + outputs[index + int(module["from"])]
+
+            elif module_type == "yolo":
+                x = predict_transform(x.data,
+                                      int (self.cnn_metadata.get("height")),
+                                      self.module_list[index][0].anchors,
+                                      int (module["classes"]),
+                                      self.cuda)
+                if not write:
+                    detections = x
+                    write = True
+                else:
+                    detections = torch.cat((detections, x), 1)
+            # Cache Feature Map
+            outputs[index] = x
+
+        return detections
 
 def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
     """
@@ -24,10 +88,9 @@ def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
         pad = (kernel_size - 1) // 2
     else:
         pad = 0
-
-    print (prev_filters, filters)
     # Add convolutional layer to the layer sequence
     conv_sublayer = nn.Conv2d(prev_filters, filters, kernel_size, stride, pad, bias = not bool(batch_normalize))
+    print( layer_index, conv_sublayer)
     module.add_module("conv_{0}".format(layer_index), conv_sublayer)
 
     # Chain batch normalization layer to convolutional layer
@@ -71,20 +134,25 @@ def route_layer(module, layer_index: int, layer_data: dict, output_filters, filt
 
     start = int(layer_data["layers"][0])
     try:
-        end = int(layer_data["layers"][1]) # Index end to 0 if no route end is given
+        end = int(layer_data["layers"][1])
     except IndexError:
         bEnd = False
+
+    # Transform parameters into a negative int of num layers back to retrieve feature map
+    if start > 0:
+        start -= layer_index
+    if bEnd and end > 0:
+        end -= layer_index
 
     # Use empty layer
     route = EmptyLayer()
     module.add_module("route_{0}".format(layer_index), route)
 
-    # Set the feature maps of this layer to the concatenation of the end indexed feature maps and
-    # start indexed feature maps if the end index is specified
-    if bEnd and end < layer_index:
-        filters = output_filters[start] + output_filters[end]
+    if bEnd and end < 0:
+        return output_filters[layer_index + start] + output_filters[layer_index + end]
     else:
-        filters = output_filters[start]
+        return output_filters[layer_index + start]
+
 
 def shortcut_layer(module, layer_index: int):
     '''
@@ -110,7 +178,7 @@ def yolo_layer(module, layer_index: int, layer_data: dict):
     anchors = layer_data["anchors"].split(",")
     anchors = [int(anchor) for anchor in anchors]
     anchors = [(anchors[i], anchors[i + 1]) for i in range(0, len(anchors), 2)]
-    anchors = anchors[0:len(mask) - 1]
+    anchors = anchors[0:len(mask)]
 
     module.add_module("Detection_{}".format(layer_index), DetectionLayer(anchors))
 
@@ -134,7 +202,7 @@ def create_modules(blocks):
         elif layer_type == 'upsample':
             upsample_layer(module, layer_index, layer_data)
         elif layer_type == 'route':
-            route_layer(module, layer_index, layer_data, output_filters, filters)
+            filters = route_layer(module, layer_index, layer_data, output_filters, filters)
         elif layer_type == 'shortcut':
             shortcut_layer(module, layer_index)
         elif layer_type == 'yolo':
@@ -143,6 +211,5 @@ def create_modules(blocks):
         module_list.append(module)
         prev_filters = filters
         output_filters.append(filters)
-
 
     return (cnn_metadata, module_list)

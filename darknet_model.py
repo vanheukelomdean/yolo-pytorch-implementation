@@ -68,6 +68,82 @@ class DarkNet (nn.Module):
 
         return detections
 
+    def load_weights(self, weights_file_path: str):
+        """
+            Deserializes weights from a binary file
+        :param weights_file_path: Path to weighst file
+        """
+
+        # Read a binary file
+        weight_file = open(weights_file_path, "rb")
+        # Store the header version data [0:3], images trained on [3:5]
+        self.header = torch.from_numpy(np.fromfile(weight_file, dtype=np.int32, count=5))
+        self.seen = self.header[3]
+        # Load weights into memory
+        weights = np.fromfile(weight_file, dtype=np.float32)
+
+        ptr = 0
+        for i in range(len(self.module_list)):
+            module_type = self.blocks[i + 1]["type"]
+            if module_type == "convolutional":
+                module = self.module_list[i]
+                try:
+                    batch_normalize = int(self.blocks[i + 1]["batch_normalize"])
+                except:
+                    batch_normalize = 0
+                conv = module[0]
+
+                if batch_normalize:
+                    bn_layer = module[1]
+                    # Number of biases; use this to partition the biases, weights, means and variances
+
+                    num_bn_biases = bn_layer.bias.numel()
+                    bn_biases = torch.from_numpy(weights[ptr:ptr + num_bn_biases])
+                    ptr += num_bn_biases
+
+                    bn_weights = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
+                    ptr += num_bn_biases
+
+                    bn_running_mean = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
+                    ptr += num_bn_biases
+
+                    bn_running_var = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
+                    ptr += num_bn_biases
+
+                    # Re-dimension weights to fit in model
+                    bn_biases = bn_biases.view_as(bn_layer.bias.data)
+                    bn_weights = bn_weights.view_as(bn_layer.weight.data)
+                    bn_running_mean = bn_running_mean.view_as(bn_layer.running_mean)
+                    bn_running_var = bn_running_var.view_as(bn_layer.running_var)
+
+                    # Replace model weights with loaded weights
+                    bn_layer.bias.data.copy_(bn_biases)
+                    bn_layer.weight.data.copy_(bn_weights)
+                    bn_layer.running_mean.copy_(bn_running_mean)
+                    bn_layer.running_var.copy_(bn_running_var)
+                else:
+                    # Number of biases
+                    num_biases = conv.bias.numel()
+
+                    # Load the biases
+                    conv_biases = torch.from_numpy(weights[ptr: ptr + num_biases])
+                    ptr += num_biases
+
+                    # Re-dimension biases to fit in model
+                    conv_biases = conv_biases.view_as(conv.bias.data)
+
+                    # Replace the model biases
+                    conv.bias.data.copy_(conv_biases)
+
+                num_weights = conv.weight.numel()
+
+                conv_weights = torch.from_numpy(weights[ptr:ptr + num_weights])
+                ptr = ptr + num_weights
+
+                conv_weights = conv_weights.view_as(conv.weight.data)
+                conv.weight.data.copy_(conv_weights)
+
+
 def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
     """
         Adds a convolutional layer to the module layer sequence
@@ -90,7 +166,6 @@ def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
         pad = 0
     # Add convolutional layer to the layer sequence
     conv_sublayer = nn.Conv2d(prev_filters, filters, kernel_size, stride, pad, bias = not bool(batch_normalize))
-    print( layer_index, conv_sublayer)
     module.add_module("conv_{0}".format(layer_index), conv_sublayer)
 
     # Chain batch normalization layer to convolutional layer

@@ -67,6 +67,144 @@ def predict_transform(prediction, input_dim, anchors, num_classes, cuda = False)
 
     return prediction
 
+def write_results(prediction, objectness_threshold, num_classes, overlap_threshold = 0.4):
+    """
+        Determines the most accurate detection and class identified by the detections
+
+    :param prediction: Tensor of prediction data for all images in batch and all potential detections per image
+    :param objectness_threshold: Required objectness confidence for a detection
+    :param num_classes: Number of object classifications
+    :param overlap_threshold: Required iou overlap for a detection
+    :return: Tensor of length 8: batch image index, corner coordinates, objectness confidence, class score and index
+    """
+    # Filter all predictions with objectness greater than the freeshold (remove all less than)
+    conf_mask = (prediction[:,:,4] > objectness_threshold).float().unsqueeze(2)
+    prediction = prediction * conf_mask
+
+    # Transform center (x,y) , (w, h) -> (l, t), (r, b)
+    tlbr_box = prediction.new(prediction.shape)
+    # Left and top
+    tlbr_box[:, :, 0] = (prediction[:, :, 0] - prediction[:, :, 2] / 2)
+    tlbr_box[:, :, 1] = (prediction[:, :, 1] - prediction[:, :, 3] / 2)
+    # Right and bottom
+    tlbr_box[:, :, 2] = (prediction[:, :, 0] + prediction[:, :, 2] / 2)
+    tlbr_box[:, :, 3] = (prediction[:, :, 1] + prediction[:, :, 3] / 2)
+    prediction[:, :, :4] = tlbr_box[:, :, :4]
+
+    # Must loop over the images in the batch because the dynamic amount of detctions per image
+    # can not be vectorized
+    batch_size = prediction.size(0)
+    write = False
+    for i in range(batch_size):
+        image_prediction = prediction[i]
+        # Get the max confidence index and score for each detction in the images prediction list
+        max_index, max_score = torch.max(image_prediction[:, 5:5 + num_classes], 1)
+        # Transpose tensors
+        max_index = max_index.float().unsqueeze(1)
+        max_score = max_score.float().unsqueeze(1)
+        # Concatenate max vectors to image predictions
+        image_pred = torch.cat((image_pred[:, :5], max_score, max_score), 1)
+        # Remove zeroed rows
+        non_zero_conf = torch.nonzero(image_pred[:, 4])
+        # Catch images with no detections when redimensioning prediction list
+        try:
+            image_pred_ = image_pred[non_zero_conf.squeeze(),:].view(-1,7)
+        except:
+            continue
+        if image_pred_.shape[0] == 0:
+            continue
+        # Get a set of classes in the image
+        image_classes = distinct_tensor(image_pred_[:, -1])
+
+        for class_ in image_classes:
+            image_pred_class = non_max_suppression(prediction, class_, overlap_threshold)
+            batch_index = image_pred_class.new(image_pred_class.size(0), 1).fill_(i)
+            # Only create the ouput tensor if there are any detections
+            if not write:
+                output = torch.cat((batch_index, image_pred_class),1)
+                write = True
+            # Append next detections to output tensor
+            else:
+                out = torch.cat((batch_index, image_pred_class),1)
+                output = torch.cat((output,out))
+
+def distinct_tensor(tensor):
+    """
+        Returns a new tensor containing all distinct values of the param tensor
+
+    :param tensor: Tensor to detect distinct values in
+    :return: Distinct valued Tensor
+    """
+    # Filter non distict values
+    tensor_np = tensor.cpu().numpy()
+    unique_np = np.unique(tensor_np)
+    unique_tensor = torch.from_numpy(unique_np)
+    # Copy tensor and return
+    tensor_res = tensor.new(unique_tensor.shape)
+    tensor_res.copy_(unique_tensor)
+    return tensor_res
+
+def non_max_suppression(prediction, class_, overlap_threshold):
+    """
+        Filters and returns detections of a single class by largest IOU
+
+    :param prediction:
+    :param class_:
+    :param overlap_threshold:
+    :return:
+    """
+    # Filter predictions of a single class
+    class_mask = prediction * (prediction[:, -1] == class_).float().unsqueeze(1)
+    class_mask_ind = torch.nonzero(class_mask[:, -2]).squeeze()
+    prediction_class = prediction[class_mask_ind].view(-1, 7)
+    # Sort confideces of the class descending
+    conf_sort_index = torch.sort(prediction_class[:, 4], descending=True)[1]
+    prediction_class = prediction_class[conf_sort_index]
+    num_detections = prediction_class.size(0)
+
+    for i in range(num_detections):
+        try:
+            # Get intersection over union of all detections for this class
+            ious = bbox_iou(prediction_class[i].unsqueeze(0), prediction_class[i+1:])
+        except ValueError or IndexError:
+            break
+
+        # Filter all detections with iou less than the threshold
+        iou_mask = (ious < overlap_threshold).float().unsqueeze(1)
+        image_pred_class[i+1:] *= iou_mask
+        non_zero_ind = torch.nonzero(image_pred_class[:,4]).squeeze()
+        image_pred_class = image_pred_class[non_zero_ind].view(-1,7)
+    return image_pred_class
+
+def bbox_iou(bbox1, bbox2):
+    """
+        Calculates and returns intersection over union metric
+
+    :param bbox1: Box 1
+    :param bbox2: Box 2
+    :return:
+    """
+    # Get box dimenstions left, top, right, bottom
+    ltbr_1 = [bbox1[:,0], bbox1[:,1], bbox1[:,2], bbox1[:,3]]
+    ltbr_2 = [bbox2[:,0], bbox2[:,1], bbox2[:,2], bbox2[:,3]]
+
+    ltbr_intersection = []
+
+    ltbr_intersection = [torch.max(ltbr_1[0], ltbr_2[0]),
+                        torch.max(ltbr_1[1], ltbr_2[1]),
+                        torch.min(ltbr_1[2], ltbr_2[2]),
+                        torch.min(ltbr_1[3], ltbr_2[3])]
+
+    area_intersection = torch.clamp(ltbr_intersection[0] - ltbr_intersection[2] + 1, min=0) \
+                        * torch.clamp(ltbr_intersection[1] - ltbr_intersection[3] + 1, min=0)
+
+    area_1 = (ltbr_1[0] - ltbr_1[2] + 1) * (ltbr_1[1] - ltbr_1[3] + 1)
+    area_2 = (ltbr_1[0] - ltbr_1[2] + 1) * (ltbr_1[1] - ltbr_1[3] + 1)
+
+    area_union = area_1 + area_2 - area_intersection
+
+    return area_intersection / area_union
+
 def get_test_input():
     img = cv2.imread("images/dog-cycle-car.png")
     img = cv2.resize(img, (416,416))          #Resize to the input dimension

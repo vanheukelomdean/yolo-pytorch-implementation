@@ -1,11 +1,12 @@
 # YOLO PyTorch Implementation
 
-This project is a small pytorch implementation of a darknet YOLO model architecture from a config file. The project is mainly educational and closely follows this [repo](https://github.com/ayooshkathuria/YOLO_v3_tutorial_from_scratch).
+This project is a small pytorch implementation of a YOLOv3 model with darknet architecture from a config file. The intent of this project is mainly educational and closely follows this [tutorial](https://blog.paperspace.com/how-to-implement-a-yolo-object-detector-in-pytorch).
 
-## Installation 
+## Installation
+  - Clone this repository
+  - Install dependencies using `pip install -r requirements.txt`
 
 ## Usage
 
 ## Authors
-
-Dean Van Heukelom
+Dean Van Heukelom - [vanheukelomdean](https://github.com/vanheukelomdean)

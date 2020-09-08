@@ -59,6 +59,8 @@ def parse_arg():
     parser.add_argument("--wts", dest = 'wtsfile', help =
                         "Location of weights file",
                         default = "trained_weights/yolov3.weights", type = str)
+    parser.add_argument("--video", dest = "video", help ="Location of video",
+                            default="", type=str)
 
     return parser.parse_args()
 

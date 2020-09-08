@@ -241,6 +241,7 @@ def prepare_input_image(image, input_dimension):
     :param input_dimension: Dimension to resize to
     :return:Input variable
     """
+    print(len(image))
     image = pad_image(image, (input_dimension, input_dimension))
     image = image[:,:,::-1].transpose((2,0,1)).copy()
     return torch.from_numpy(image).float().div(255.0).unsqueeze(0)
@@ -254,14 +255,20 @@ def get_test_input():
     img_ = Variable(img_)
     return img_
 
-def draw(x, results, class_, color):
+def draw(x, results, class_, color, video = False):
+    if video:
+        img = results
+    else:
+        img = results[int(x[0])]
+    # Color the bbox
     c1 = tuple(x[1:3].int())
     c2 = tuple(x[3:5].int())
-    img = results[int(x[0])]
     label = "{0}".format(class_)
     cv2.rectangle(img, c1, c2, color, 1)
+    # color the label surrounded by rectangle-filled bbox color
     t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_PLAIN, 1 , 1)[0]
     c2 = c1[0] + t_size[0] + 3, c1[1] + t_size[1] + 4
     cv2.rectangle(img, c1, c2, color, -1)
-    cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225,255,255], 1);
+    cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225,255,255], 1)
+
     return img

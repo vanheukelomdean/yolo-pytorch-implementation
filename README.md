@@ -7,6 +7,7 @@ This project is a small pytorch implementation of a YOLOv3 model with darknet ar
   - Install dependencies using `pip install -r requirements.txt`
 
 ## Usage
+![Detection Demo](/images/output/yolo_custom.jpg)     
 Run module `detect.py` with any of the below options:
 
 - `--load`: str - Image load directory   

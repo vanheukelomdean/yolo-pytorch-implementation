@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as func
 from abstract_layers import DetectionLayer, EmptyLayer
-from cfg_parser import parse_cfg, print_cfg
+from parse import parse_cfg
 from util import *
 
 class DarkNet (nn.Module):
@@ -85,12 +85,14 @@ class DarkNet (nn.Module):
         ptr = 0
         for i in range(len(self.module_list)):
             module_type = self.blocks[i + 1]["type"]
+
             if module_type == "convolutional":
                 module = self.module_list[i]
                 try:
                     batch_normalize = int(self.blocks[i + 1]["batch_normalize"])
                 except:
                     batch_normalize = 0
+
                 conv = module[0]
 
                 if batch_normalize:
@@ -138,10 +140,11 @@ class DarkNet (nn.Module):
                 num_weights = conv.weight.numel()
 
                 conv_weights = torch.from_numpy(weights[ptr:ptr + num_weights])
-                ptr = ptr + num_weights
+                ptr += num_weights
 
                 conv_weights = conv_weights.view_as(conv.weight.data)
                 conv.weight.data.copy_(conv_weights)
+
 
 
 def conv_layer(module, layer_index: int, layer_data: dict, prev_filters: int):
@@ -190,7 +193,7 @@ def upsample_layer(module, layer_index: int, layer_data: dict):
     """
     stride = int(layer_data["stride"])
     # Apply bilinear upsampling technique
-    upsample = nn.Upsample(scale_factor=2, mode="bilinear")
+    upsample = nn.Upsample(scale_factor=2, mode="nearest")
     module.add_module("upsample_{}".format(layer_index), upsample)
 
 def route_layer(module, layer_index: int, layer_data: dict, output_filters, filters):
@@ -248,13 +251,11 @@ def yolo_layer(module, layer_index: int, layer_data: dict):
     # Transform the comma separated string into a list of ints
     mask = layer_data["mask"].split(",")
     mask = [int(mask_value) for mask_value in mask]
-
     # Split, cast, pair coordinates, and cut indices to mask array length
     anchors = layer_data["anchors"].split(",")
     anchors = [int(anchor) for anchor in anchors]
     anchors = [(anchors[i], anchors[i + 1]) for i in range(0, len(anchors), 2)]
-    anchors = anchors[0:len(mask)]
-
+    anchors = [anchors[mask_value] for mask_value in mask]
     module.add_module("Detection_{}".format(layer_index), DetectionLayer(anchors))
 
 def create_modules(blocks):

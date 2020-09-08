@@ -2,6 +2,7 @@ from __future__ import division
 import torch
 from torch.autograd import Variable
 import numpy as np
+from PIL import Image
 import cv2
 
 def predict_transform(prediction, input_dim, anchors, num_classes, cuda = False):
@@ -64,7 +65,6 @@ def predict_transform(prediction, input_dim, anchors, num_classes, cuda = False)
 
     # Resize bounding box attributes from detection map back to input image size
     prediction[:, :, :4] *= stride
-
     return prediction
 
 def write_results(prediction, objectness_threshold, num_classes, overlap_threshold = 0.4):
@@ -80,17 +80,15 @@ def write_results(prediction, objectness_threshold, num_classes, overlap_thresho
     # Filter all predictions with objectness greater than the freeshold (remove all less than)
     conf_mask = (prediction[:,:,4] > objectness_threshold).float().unsqueeze(2)
     prediction = prediction * conf_mask
-
     # Transform center (x,y) , (w, h) -> (l, t), (r, b)
-    tlbr_box = prediction.new(prediction.shape)
+    ltrb_box = prediction.new(prediction.shape)
     # Left and top
-    tlbr_box[:, :, 0] = (prediction[:, :, 0] - prediction[:, :, 2] / 2)
-    tlbr_box[:, :, 1] = (prediction[:, :, 1] - prediction[:, :, 3] / 2)
+    ltrb_box[:, :, 0] = (prediction[:, :, 0] - prediction[:, :, 2] / 2)
+    ltrb_box[:, :, 1] = (prediction[:, :, 1] - prediction[:, :, 3] / 2)
     # Right and bottom
-    tlbr_box[:, :, 2] = (prediction[:, :, 0] + prediction[:, :, 2] / 2)
-    tlbr_box[:, :, 3] = (prediction[:, :, 1] + prediction[:, :, 3] / 2)
-    prediction[:, :, :4] = tlbr_box[:, :, :4]
-
+    ltrb_box[:, :, 2] = (prediction[:, :, 0] + prediction[:, :, 2] / 2)
+    ltrb_box[:, :, 3] = (prediction[:, :, 1] + prediction[:, :, 3] / 2)
+    prediction[:, :, :4] = ltrb_box[:, :, :4]
     # Must loop over the images in the batch because the dynamic amount of detctions per image
     # can not be vectorized
     batch_size = prediction.size(0)
@@ -103,7 +101,7 @@ def write_results(prediction, objectness_threshold, num_classes, overlap_thresho
         max_index = max_index.float().unsqueeze(1)
         max_score = max_score.float().unsqueeze(1)
         # Concatenate max vectors to image predictions
-        image_pred = torch.cat((image_pred[:, :5], max_score, max_score), 1)
+        image_pred = torch.cat((image_prediction[:, :5], max_index, max_score), 1)
         # Remove zeroed rows
         non_zero_conf = torch.nonzero(image_pred[:, 4])
         # Catch images with no detections when redimensioning prediction list
@@ -115,9 +113,8 @@ def write_results(prediction, objectness_threshold, num_classes, overlap_thresho
             continue
         # Get a set of classes in the image
         image_classes = distinct_tensor(image_pred_[:, -1])
-
         for class_ in image_classes:
-            image_pred_class = non_max_suppression(prediction, class_, overlap_threshold)
+            image_pred_class = non_max_suppression(image_pred_, class_, overlap_threshold)
             batch_index = image_pred_class.new(image_pred_class.size(0), 1).fill_(i)
             # Only create the ouput tensor if there are any detections
             if not write:
@@ -127,6 +124,11 @@ def write_results(prediction, objectness_threshold, num_classes, overlap_thresho
             else:
                 out = torch.cat((batch_index, image_pred_class),1)
                 output = torch.cat((output,out))
+    # Safely return output in case of no detections
+    try:
+        return output
+    except:
+        return 0
 
 def distinct_tensor(tensor):
     """
@@ -155,8 +157,8 @@ def non_max_suppression(prediction, class_, overlap_threshold):
     """
     # Filter predictions of a single class
     class_mask = prediction * (prediction[:, -1] == class_).float().unsqueeze(1)
-    class_mask_ind = torch.nonzero(class_mask[:, -2]).squeeze()
-    prediction_class = prediction[class_mask_ind].view(-1, 7)
+    class_mask_index = torch.nonzero(class_mask[:, -2]).squeeze()
+    prediction_class = prediction[class_mask_index].view(-1, 7)
     # Sort confideces of the class descending
     conf_sort_index = torch.sort(prediction_class[:, 4], descending=True)[1]
     prediction_class = prediction_class[conf_sort_index]
@@ -166,15 +168,17 @@ def non_max_suppression(prediction, class_, overlap_threshold):
         try:
             # Get intersection over union of all detections for this class
             ious = bbox_iou(prediction_class[i].unsqueeze(0), prediction_class[i+1:])
-        except ValueError or IndexError:
+        except ValueError:
             break
-
+        except IndexError:
+            break
         # Filter all detections with iou less than the threshold
+        # print(ious, overlap_threshold)
         iou_mask = (ious < overlap_threshold).float().unsqueeze(1)
-        image_pred_class[i+1:] *= iou_mask
-        non_zero_ind = torch.nonzero(image_pred_class[:,4]).squeeze()
-        image_pred_class = image_pred_class[non_zero_ind].view(-1,7)
-    return image_pred_class
+        prediction_class[i+1:] *= iou_mask
+        non_zero_ind = torch.nonzero(prediction_class[:,4]).squeeze()
+        prediction_class = prediction_class[non_zero_ind].view(-1,7)
+    return prediction_class
 
 def bbox_iou(bbox1, bbox2):
     """
@@ -182,34 +186,82 @@ def bbox_iou(bbox1, bbox2):
 
     :param bbox1: Box 1
     :param bbox2: Box 2
+    :return: ratio area of intersection to area of union
+    """
+
+    # Get the coordinates of bounding boxes
+    left1, top1, right1, bottom1 = bbox1[:, 0], bbox1[:, 1], bbox1[:, 2], bbox1[:, 3]
+    left2, top2, right2, bottom2 = bbox2[:, 0], bbox2[:, 1], bbox2[:, 2], bbox2[:, 3]
+
+    # Get the coordinates of the intersection rectangle
+    left_inter = torch.max(left1, left2)
+    top_inter = torch.max(top1, top2)
+    right_inter = torch.min(right1, right2)
+    bottom_inter = torch.min(bottom1, bottom2)
+
+    # Intersection area
+    inter_area = torch.clamp(right_inter - left_inter + 1, min=0) * \
+                 torch.clamp(bottom_inter - top_inter + 1, min=0)
+    # Box areas
+    area1 = (right1 - left1 + 1) * (bottom1 - top1 + 1)
+    area2 = (right2 - left2 + 1) * (bottom2 - top2 + 1)
+
+    return inter_area / (area1 + area2 - inter_area)
+
+
+def pad_image(image, input_dimension):
+    """
+        Resizes image to model input dimensions while maintaining aspect ratio
+            by padding image margins witn grey
+    :param image: Frame to resize
+    :param input_dimension: Dimensions of cnn input variable
     :return:
     """
-    # Get box dimenstions left, top, right, bottom
-    ltbr_1 = [bbox1[:,0], bbox1[:,1], bbox1[:,2], bbox1[:,3]]
-    ltbr_2 = [bbox2[:,0], bbox2[:,1], bbox2[:,2], bbox2[:,3]]
+    image_h, image_w = image.shape[0], image.shape[1]
 
-    ltbr_intersection = []
+    width, height = input_dimension
+    min_rescale = min(width/image_w, height/image_h)
+    new_width, new_height = int(image_w * min_rescale), int(image_h * min_rescale)
+    resized_image = cv2.resize(image, (new_width,new_height), interpolation=cv2.INTER_CUBIC)
 
-    ltbr_intersection = [torch.max(ltbr_1[0], ltbr_2[0]),
-                        torch.max(ltbr_1[1], ltbr_2[1]),
-                        torch.min(ltbr_1[2], ltbr_2[2]),
-                        torch.min(ltbr_1[3], ltbr_2[3])]
+    # Fill numpy array with grey pixels
+    canvas = np.full((width, height, 3), 128)
+    # Calculate margins to pad
+    horizontal_pad = (width - new_width) // 2
+    vertical_pad = (height - new_height) // 2
+    #Place image in center
+    canvas[vertical_pad:vertical_pad + new_height,
+            horizontal_pad:horizontal_pad + new_width, :] = resized_image
+    return canvas
 
-    area_intersection = torch.clamp(ltbr_intersection[0] - ltbr_intersection[2] + 1, min=0) \
-                        * torch.clamp(ltbr_intersection[1] - ltbr_intersection[3] + 1, min=0)
-
-    area_1 = (ltbr_1[0] - ltbr_1[2] + 1) * (ltbr_1[1] - ltbr_1[3] + 1)
-    area_2 = (ltbr_1[0] - ltbr_1[2] + 1) * (ltbr_1[1] - ltbr_1[3] + 1)
-
-    area_union = area_1 + area_2 - area_intersection
-
-    return area_intersection / area_union
+def prepare_input_image(image, input_dimension):
+    """
+        Return image as a variable for cnn input
+    :param image: Frame to input
+    :param input_dimension: Dimension to resize to
+    :return:Input variable
+    """
+    image = pad_image(image, (input_dimension, input_dimension))
+    image = image[:,:,::-1].transpose((2,0,1)).copy()
+    return torch.from_numpy(image).float().div(255.0).unsqueeze(0)
 
 def get_test_input():
-    img = cv2.imread("images/dog-cycle-car.png")
+    img = cv2.imread("images/input/dog-cycle-car.png")
     img = cv2.resize(img, (416,416))          #Resize to the input dimension
     img_ =  img[:,:,::-1].transpose((2,0,1))  # BGR -> RGB | H X W C -> C X H X W
     img_ = img_[np.newaxis,:,:,:]/255.0       #Add a channel at 0 (for batch) | Normalise
     img_ = torch.from_numpy(img_).float()     #Convert to float
     img_ = Variable(img_)
     return img_
+
+def draw(x, results, class_, color):
+    c1 = tuple(x[1:3].int())
+    c2 = tuple(x[3:5].int())
+    img = results[int(x[0])]
+    label = "{0}".format(class_)
+    cv2.rectangle(img, c1, c2, color, 1)
+    t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_PLAIN, 1 , 1)[0]
+    c2 = c1[0] + t_size[0] + 3, c1[1] + t_size[1] + 4
+    cv2.rectangle(img, c1, c2, color, -1)
+    cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225,255,255], 1);
+    return img
